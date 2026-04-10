@@ -291,6 +291,143 @@ async function scanX402Ecosystem() {
   }
 }
 
+// 6. Scan trending tokens on Base
+async function scanTrendingTokens() {
+  console.log('[ORACLE] Scanning trending tokens...');
+  try {
+    const resp = await fetchWithTimeout(
+      'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&category=base-ecosystem&order=volume_desc&per_page=10',
+      10000
+    );
+
+    if (resp && Array.isArray(resp) && resp.length > 0) {
+      const tokens = resp.map(t => ({
+        symbol: t.symbol?.toUpperCase(),
+        name: t.name,
+        price_usd: t.current_price,
+        change_24h: t.price_change_percentage_24h?.toFixed(2) + '%',
+        volume_24h: Math.round(t.total_volume || 0),
+        market_cap: Math.round(t.market_cap || 0)
+      }));
+
+      // Signal for big movers (>15% change)
+      const bigMovers = resp.filter(t => Math.abs(t.price_change_percentage_24h || 0) > 15);
+      if (bigMovers.length > 0) {
+        for (const mover of bigMovers.slice(0, 3)) {
+          await publishSignal({
+            type: 'market/price',
+            severity: Math.abs(mover.price_change_percentage_24h) > 30 ? 'high' : 'medium',
+            title: `${mover.symbol?.toUpperCase()} ${mover.price_change_percentage_24h > 0 ? 'surging' : 'dumping'} ${Math.abs(mover.price_change_percentage_24h).toFixed(1)}% on Base`,
+            data: {
+              token: mover.symbol?.toUpperCase(),
+              name: mover.name,
+              price: mover.current_price,
+              change_24h: mover.price_change_percentage_24h?.toFixed(2) + '%',
+              volume_24h: Math.round(mover.total_volume || 0),
+              chain: 'Base'
+            },
+            confidence: 0.9,
+            ttl_hours: 6
+          });
+        }
+      }
+
+      // General top tokens signal
+      await publishSignal({
+        type: 'market/liquidity',
+        severity: 'info',
+        title: `Base ecosystem: Top ${tokens.length} tokens by volume`,
+        data: { chain: 'Base', top_tokens: tokens.slice(0, 5) },
+        confidence: 0.85,
+        ttl_hours: 6
+      });
+    }
+  } catch (e) {
+    console.error('[ORACLE] Trending tokens scan failed:', e.message);
+  }
+}
+
+// 7. Security news scan
+async function scanSecurityNews() {
+  console.log('[ORACLE] Scanning security news...');
+  const queries = [
+    'DeFi exploit hack April 2026',
+    'smart contract vulnerability Base chain',
+    'crypto security incident rug pull 2026'
+  ];
+
+  const query = queries[Math.floor(Math.random() * queries.length)];
+
+  try {
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const resp = await axios.get(searchUrl, {
+      headers: { 'User-Agent': 'DELPHI-Oracle/0.1' },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(resp.data);
+    const results = [];
+    $('.result__body').each((i, el) => {
+      if (i >= 3) return false;
+      const title = $(el).find('.result__title').text().trim();
+      const snippet = $(el).find('.result__snippet').text().trim();
+      if (title && snippet) results.push({ title, snippet });
+    });
+
+    if (results.length > 0) {
+      // Check if any result looks like a real exploit/hack
+      const exploitKeywords = ['exploit', 'hack', 'drain', 'stolen', 'vulnerability', 'rug pull', 'flash loan'];
+      const hasExploit = results.some(r =>
+        exploitKeywords.some(k => (r.title + r.snippet).toLowerCase().includes(k))
+      );
+
+      if (hasExploit) {
+        await publishSignal({
+          type: 'security/exploit',
+          severity: 'high',
+          title: `Security alert: potential incident detected — "${results[0].title}"`,
+          data: { query, findings: results, requires_verification: true },
+          confidence: 0.5,
+          ttl_hours: 12
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[ORACLE] Security scan failed:', e.message);
+  }
+}
+
+// 8. Base network activity via public RPC
+async function scanBaseNetwork() {
+  console.log('[ORACLE] Scanning Base network activity...');
+  try {
+    const resp = await axios.post('https://mainnet.base.org', {
+      jsonrpc: '2.0', method: 'eth_gasPrice', params: [], id: 1
+    }, { timeout: 8000 });
+
+    if (resp.data && resp.data.result) {
+      const gasPriceGwei = parseInt(resp.data.result, 16) / 1e9;
+
+      if (!isNaN(gasPriceGwei)) {
+        await publishSignal({
+          type: 'market/liquidity',
+          severity: gasPriceGwei > 0.1 ? 'medium' : 'info',
+          title: `Base gas: ${gasPriceGwei.toFixed(6)} Gwei`,
+          data: {
+            chain: 'Base',
+            gas_price_gwei: parseFloat(gasPriceGwei.toFixed(6)),
+            congestion: gasPriceGwei > 0.1 ? 'elevated' : 'normal'
+          },
+          confidence: 0.99,
+          ttl_hours: 1
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[ORACLE] Base network scan failed:', e.message);
+  }
+}
+
 // ── Oracle Run Cycle ────────────────────────────────────────────────
 async function runOracleCycle() {
   console.log(`\n[ORACLE] === Cycle starting at ${new Date().toISOString()} ===`);
@@ -302,6 +439,9 @@ async function runOracleCycle() {
     { name: 'market-signals', fn: scanMarketSignals },
     { name: 'agent-ecosystem', fn: scanAgentEcosystem },
     { name: 'x402-ecosystem', fn: scanX402Ecosystem },
+    { name: 'trending-tokens', fn: scanTrendingTokens },
+    { name: 'security-news', fn: scanSecurityNews },
+    { name: 'base-network', fn: scanBaseNetwork },
   ];
 
   for (const scan of scans) {

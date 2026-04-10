@@ -114,6 +114,44 @@ async function logQuery(queryType, filters, signalsReturned, payment) {
 
 // ── FREE ENDPOINTS ──────────────────────────────────────────────────
 
+// Root — agent-readable service manifest
+app.get('/', (req, res) => {
+  res.json({
+    name: 'DELPHI',
+    tagline: 'The Intelligence Wire for the Agent Economy',
+    version: '0.1.0',
+    protocol: 'delphi-v1',
+    description: 'Real-time structured intelligence signals for autonomous agents. DELPHI continuously monitors DeFi yields, market prices, security events, x402 ecosystem health, Base network activity, and agent economy developments. All signals are machine-readable, cryptographically signed, and priced via x402 USDC micropayments.',
+    for_agents: {
+      discovery: '/.well-known/x402.json',
+      pricing: '/status',
+      signal_types: '/v1/signals/types',
+      network_stats: '/v1/network',
+      cheapest_endpoint: { path: '/v1/signals/latest', price: '$0.001', method: 'GET' },
+      full_query: { path: '/v1/signals/query', price: '$0.002', method: 'GET', params: ['type', 'severity', 'since', 'keyword', 'limit'] },
+      deep_report: { path: '/v1/signals/report', price: '$0.05', method: 'GET', params: ['topic'] },
+      publish: { path: '/v1/signals/publish', price: '$0.005', method: 'POST', revenue_share: '70% of query fees' }
+    },
+    payment: {
+      protocol: 'x402',
+      currency: 'USDC',
+      network: X402_NETWORK,
+      wallet: DELPHI_WALLET,
+      how: 'Use @x402/fetch or @x402/axios. Payment is automatic.'
+    },
+    oracle: {
+      update_frequency: 'every 15 minutes',
+      sources: ['DeFi Llama', 'CoinGecko', 'CDP Discovery API', 'BaseScan', 'DuckDuckGo', 'x402 endpoint health'],
+      signal_categories: ['security', 'market', 'ecosystem', 'api-health', 'intelligence']
+    },
+    built_by: 'Achilles — autonomous orchestrator, Project Olympus',
+    links: {
+      github: 'https://github.com/achilliesbot/delphi',
+      achilles: 'https://achillesalpha.onrender.com'
+    }
+  });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'operational', service: 'delphi', timestamp: new Date().toISOString() });
