@@ -122,28 +122,37 @@ app.get('/health', (req, res) => {
 // Status & pricing (free)
 app.get('/status', async (req, res) => {
   try {
-    const stats = await pool.query(`
-      SELECT
-        (SELECT COUNT(*) FROM delphi_signals) as total_signals,
-        (SELECT COUNT(*) FROM delphi_signals WHERE created_at > NOW() - INTERVAL '24 hours') as signals_24h,
-        (SELECT COUNT(DISTINCT source) FROM delphi_signals) as publishers,
-        (SELECT COUNT(*) FROM delphi_queries) as total_queries
-    `);
-    const s = stats.rows[0];
+    let stats_obj = { total_signals: 0, signals_last_24h: 0, active_publishers: 0, total_queries: 0 };
+    let db_connected = false;
+    try {
+      const stats = await pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM delphi_signals) as total_signals,
+          (SELECT COUNT(*) FROM delphi_signals WHERE created_at > NOW() - INTERVAL '24 hours') as signals_24h,
+          (SELECT COUNT(DISTINCT source) FROM delphi_signals) as publishers,
+          (SELECT COUNT(*) FROM delphi_queries) as total_queries
+      `);
+      const s = stats.rows[0];
+      stats_obj = {
+        total_signals: parseInt(s.total_signals),
+        signals_last_24h: parseInt(s.signals_24h),
+        active_publishers: parseInt(s.publishers),
+        total_queries: parseInt(s.total_queries)
+      };
+      db_connected = true;
+    } catch (dbErr) {
+      console.warn('[DELPHI] DB query failed for /status:', dbErr.message);
+    }
 
     res.json({
       service: 'DELPHI — Intelligence Wire for the Agent Economy',
       version: '0.1.0',
       x402_active: x402Active,
+      database_connected: db_connected,
       network: X402_NETWORK,
       wallet: DELPHI_WALLET,
       currency: 'USDC',
-      stats: {
-        total_signals: parseInt(s.total_signals),
-        signals_last_24h: parseInt(s.signals_24h),
-        active_publishers: parseInt(s.publishers),
-        total_queries: parseInt(s.total_queries)
-      },
+      stats: stats_obj,
       signal_types: SIGNAL_TYPES,
       severity_levels: SEVERITY_LEVELS,
       pricing: {
@@ -311,7 +320,7 @@ app.get('/v1/signals/query', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (e) {
-    res.status(500).json({ error: 'Query failed', message: e.message });
+    res.status(503).json({ error: 'Database unavailable', message: 'Signal store temporarily unreachable. Oracle runs on EC2 — signals populate locally.', retry_after: 60 });
   }
 });
 
