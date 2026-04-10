@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 
 // ── Database ────────────────────────────────────────────────────────
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres@localhost/achilles_db',
+  connectionString: process.env.DATABASE_URL || 'postgresql://achilles:olympus2026@localhost:5432/achilles_db',
   max: 10,
   idleTimeoutMillis: 30000,
 });
@@ -26,6 +26,16 @@ const pool = new pg.Pool({
 // ── Middleware ───────────────────────────────────────────────────────
 app.use(express.json({ limit: '100kb' }));
 app.set('trust proxy', 1);
+
+// CORS — allow any agent to call DELPHI
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-402-Payment');
+  res.setHeader('X-Powered-By', 'DELPHI/0.1.0');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -123,9 +133,13 @@ app.get('/', (req, res) => {
     protocol: 'delphi-v1',
     description: 'Real-time structured intelligence signals for autonomous agents. DELPHI continuously monitors DeFi yields, market prices, security events, x402 ecosystem health, Base network activity, and agent economy developments. All signals are machine-readable, cryptographically signed, and priced via x402 USDC micropayments.',
     for_agents: {
+      start_here: 'Call GET /v1/signals/count (free) to check available signals, then GET /v1/signals/latest ($0.001) to read them.',
       discovery: '/.well-known/x402.json',
+      openapi: '/openapi.json',
       pricing: '/status',
       signal_types: '/v1/signals/types',
+      categories: '/v1/signals/categories',
+      count_preview: { path: '/v1/signals/count', price: 'FREE', method: 'GET', params: ['type', 'severity', 'since'] },
       network_stats: '/v1/network',
       cheapest_endpoint: { path: '/v1/signals/latest', price: '$0.001', method: 'GET' },
       full_query: { path: '/v1/signals/query', price: '$0.002', method: 'GET', params: ['type', 'severity', 'since', 'keyword', 'limit'] },
@@ -200,9 +214,14 @@ app.get('/status', async (req, res) => {
         'POST /v1/signals/publish': '$0.005 — Publish a signal (earn 70% on consumption)'
       },
       free_endpoints: {
-        'GET /status': 'This endpoint',
+        'GET /': 'Agent-readable service manifest',
+        'GET /status': 'This endpoint — pricing, stats, signal types',
         'GET /health': 'Health check',
         'GET /v1/signals/types': 'Available signal types',
+        'GET /v1/signals/categories': 'Live category tree with signal counts',
+        'GET /v1/signals/count': 'Preview signal count before paying (supports type/severity/since filters)',
+        'GET /v1/network': 'Network stats and signal distribution',
+        'GET /openapi.json': 'OpenAPI 3.0 schema for LLM tool-use integration',
         'GET /.well-known/x402.json': 'x402 discovery manifest'
       },
       how_to_use: 'Query signals using an x402-compatible client. Payment is automatic via USDC.',
@@ -227,6 +246,113 @@ app.get('/v1/signals/types', (req, res) => {
     severity_levels: SEVERITY_LEVELS,
     description: 'Use these types and severities when querying or publishing signals.'
   });
+});
+
+// OpenAPI schema for LLM tool-use integration
+app.get('/openapi.json', (req, res) => {
+  res.json({
+    openapi: '3.0.3',
+    info: {
+      title: 'DELPHI Intelligence Wire API',
+      version: '0.1.0',
+      description: 'Real-time structured intelligence signals for autonomous agents. Query market data, security alerts, ecosystem changes, API health. All responses are JSON, machine-readable, cryptographically signed. Payment via x402 USDC micropayments.',
+      contact: { name: 'Achilles', url: 'https://github.com/achilliesbot/delphi' }
+    },
+    servers: [{ url: process.env.RENDER_EXTERNAL_URL || 'https://delphi-oracle.onrender.com' }],
+    paths: {
+      '/v1/signals/query': {
+        get: {
+          summary: 'Query intelligence signals',
+          description: 'Filter signals by type, severity, time range, or keyword. Requires x402 payment ($0.002 USDC).',
+          parameters: [
+            { name: 'type', in: 'query', schema: { type: 'string' }, description: 'Signal type (e.g. market/yield, security/exploit)' },
+            { name: 'severity', in: 'query', schema: { type: 'string', enum: ['critical','high','medium','low','info'] }, description: 'Minimum severity filter' },
+            { name: 'since', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'Only signals after this ISO timestamp' },
+            { name: 'keyword', in: 'query', schema: { type: 'string' }, description: 'Search in title and data' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 50 }, description: 'Max results' }
+          ],
+          responses: { '200': { description: 'Signal results', content: { 'application/json': { schema: { type: 'object', properties: { query_id: { type: 'string' }, count: { type: 'integer' }, signals: { type: 'array' } } } } } }, '402': { description: 'Payment required' } }
+        }
+      },
+      '/v1/signals/latest': {
+        get: {
+          summary: 'Get latest signals',
+          description: 'Latest signals across all categories. Cheapest endpoint ($0.001 USDC).',
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 10, maximum: 50 } }
+          ],
+          responses: { '200': { description: 'Latest signals' }, '402': { description: 'Payment required' } }
+        }
+      },
+      '/v1/signals/report': {
+        get: {
+          summary: 'Deep intelligence report',
+          description: 'Synthesized report on a topic from recent signals ($0.05 USDC).',
+          parameters: [
+            { name: 'topic', in: 'query', required: true, schema: { type: 'string' }, description: 'Topic to analyze' }
+          ],
+          responses: { '200': { description: 'Intelligence report' }, '402': { description: 'Payment required' } }
+        }
+      },
+      '/v1/signals/publish': {
+        post: {
+          summary: 'Publish a signal',
+          description: 'Publish intelligence to DELPHI. Earn 70% of query fees when consumed ($0.005 USDC).',
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: {
+              type: 'object',
+              required: ['type', 'title', 'data'],
+              properties: {
+                type: { type: 'string', description: 'Signal type' },
+                severity: { type: 'string', enum: ['critical','high','medium','low','info'], default: 'info' },
+                title: { type: 'string' },
+                data: { type: 'object' },
+                confidence: { type: 'number', minimum: 0, maximum: 1, default: 0.5 },
+                publisher_wallet: { type: 'string' },
+                ttl_hours: { type: 'integer', default: 48 }
+              }
+            } } }
+          },
+          responses: { '201': { description: 'Signal published' }, '402': { description: 'Payment required' } }
+        }
+      }
+    }
+  });
+});
+
+// Live categories with signal counts
+app.get('/v1/signals/categories', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT type, COUNT(*) as count,
+             MAX(created_at) as latest_signal,
+             AVG(confidence) as avg_confidence
+      FROM delphi_signals
+      WHERE (expires_at IS NULL OR expires_at > NOW())
+      GROUP BY type ORDER BY count DESC
+    `);
+
+    const categories = {};
+    result.rows.forEach(r => {
+      const [cat, sub] = r.type.split('/');
+      if (!categories[cat]) categories[cat] = { total: 0, subtypes: {} };
+      categories[cat].total += parseInt(r.count);
+      categories[cat].subtypes[sub] = {
+        count: parseInt(r.count),
+        latest: r.latest_signal,
+        avg_confidence: parseFloat(parseFloat(r.avg_confidence).toFixed(2))
+      };
+    });
+
+    res.json({
+      categories,
+      total_active_signals: result.rows.reduce((s, r) => s + parseInt(r.count), 0),
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.json({ categories: {}, total_active_signals: 0, database_connected: false, timestamp: new Date().toISOString() });
+  }
 });
 
 // x402 Discovery Manifest
@@ -284,6 +410,39 @@ app.get('/.well-known/x402.json', (req, res) => {
       }
     ]
   });
+});
+
+// Signal count preview (free — lets agents check before paying)
+app.get('/v1/signals/count', async (req, res) => {
+  try {
+    const { type, severity, since } = req.query;
+    let where = ['(expires_at IS NULL OR expires_at > NOW())'];
+    let params = [];
+    let idx = 1;
+
+    if (type) { where.push(`type = $${idx++}`); params.push(type); }
+    if (severity) {
+      const sevIdx = SEVERITY_LEVELS.indexOf(severity);
+      if (sevIdx >= 0) {
+        where.push(`severity = ANY($${idx++})`);
+        params.push(SEVERITY_LEVELS.slice(0, sevIdx + 1));
+      }
+    }
+    if (since) { where.push(`created_at >= $${idx++}`); params.push(since); }
+
+    const result = await pool.query(
+      `SELECT COUNT(*) as count FROM delphi_signals WHERE ${where.join(' AND ')}`, params
+    );
+
+    res.json({
+      count: parseInt(result.rows[0].count),
+      filters: { type: type || 'all', severity: severity || 'all', since: since || 'all-time' },
+      hint: 'Use GET /v1/signals/query ($0.002) or /v1/signals/latest ($0.001) to retrieve full signal data.',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.json({ count: 0, database_connected: false, timestamp: new Date().toISOString() });
+  }
 });
 
 // ── PAID ENDPOINTS ──────────────────────────────────────────────────
@@ -358,7 +517,13 @@ app.get('/v1/signals/query', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (e) {
-    res.status(503).json({ error: 'Database unavailable', message: 'Signal store temporarily unreachable. Oracle runs on EC2 — signals populate locally.', retry_after: 60 });
+    res.status(503).json({
+      error: 'database_unavailable',
+      message: 'Signal store temporarily unreachable.',
+      retry_after_seconds: 60,
+      action: 'Retry this request in 60 seconds. If persistent, try GET /status to check database_connected.',
+      fallback: 'GET /v1/signals/types is always available (free, no DB required).'
+    });
   }
 });
 

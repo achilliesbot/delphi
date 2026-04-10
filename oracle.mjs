@@ -14,7 +14,7 @@ import crypto from 'crypto';
 import { randomUUID } from 'crypto';
 
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres@localhost/achilles_db',
+  connectionString: process.env.DATABASE_URL || 'postgresql://achilles:olympus2026@localhost:5432/achilles_db',
   max: 5,
 });
 
