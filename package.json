@@ -1,0 +1,35 @@
+{
+  "name": "delphi",
+  "version": "0.1.0",
+  "description": "DELPHI — The Intelligence Wire for the Agent Economy",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "oracle": "node oracle.mjs"
+  },
+  "dependencies": {
+    "@x402/core": "^2.9.0",
+    "@x402/evm": "^2.9.0",
+    "@x402/express": "^2.9.0",
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0",
+    "crypto-js": "^4.2.0",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.0",
+    "uuid": "^10.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "delphi",
+    "x402",
+    "agent-intelligence",
+    "oracle",
+    "signal-network"
+  ],
+  "license": "MIT"
+}
