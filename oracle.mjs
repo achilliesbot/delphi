@@ -30,6 +30,32 @@ function generateSignalId(type) {
   return `dph_${type.replace('/', '-')}_${ts}_${rand}`;
 }
 
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+async function notifySubscribers(signal) {
+  try {
+    const subs = await pool.query(
+      `SELECT sub_id, webhook_url, filter_types, min_severity FROM delphi_subscriptions WHERE active = true`
+    );
+    for (const sub of subs.rows) {
+      // Check type filter
+      if (sub.filter_types && sub.filter_types.length > 0 && !sub.filter_types.includes(signal.type)) continue;
+      // Check severity filter
+      if ((SEVERITY_RANK[signal.severity] || 4) > (SEVERITY_RANK[sub.min_severity] || 4)) continue;
+
+      try {
+        await axios.post(sub.webhook_url, { event: 'new_signal', signal }, { timeout: 5000 });
+        await pool.query(
+          `UPDATE delphi_subscriptions SET last_notified = NOW(), notifications_sent = notifications_sent + 1 WHERE sub_id = $1`,
+          [sub.sub_id]
+        );
+      } catch (e) {
+        console.warn(`[ORACLE] Webhook failed for ${sub.sub_id}: ${e.message}`);
+      }
+    }
+  } catch (e) { /* non-critical */ }
+}
+
 async function publishSignal({ type, severity, title, data, confidence, ttl_hours = 48 }) {
   const signalId = generateSignalId(type);
   const expiresAt = new Date(Date.now() + (ttl_hours * 60 * 60 * 1000));
@@ -44,6 +70,10 @@ async function publishSignal({ type, severity, title, data, confidence, ttl_hour
       [signalId, type, severity, title, JSON.stringify(data), confidence, signature, expiresAt]
     );
     console.log(`[ORACLE] Published: ${type} | ${severity} | ${title}`);
+
+    // Notify webhook subscribers
+    await notifySubscribers({ signal_id: signalId, type, severity, title, data, confidence, signature, timestamp: signalData.timestamp });
+
     return signalId;
   } catch (e) {
     console.error(`[ORACLE] Failed to publish signal: ${e.message}`);

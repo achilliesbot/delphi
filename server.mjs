@@ -735,6 +735,58 @@ app.get('/v1/network', async (req, res) => {
   }
 });
 
+// ── Webhook Subscriptions (free to register) ───────────────────────
+
+// Subscribe to push notifications
+app.post('/v1/signals/subscribe', async (req, res) => {
+  try {
+    const { webhook_url, filter_types = [], min_severity = 'info' } = req.body;
+    if (!webhook_url || typeof webhook_url !== 'string') {
+      return res.status(400).json({
+        error: 'webhook_url required',
+        description: 'Provide a URL where DELPHI will POST new signals matching your filters.',
+        example: { webhook_url: 'https://your-agent.com/delphi-webhook', filter_types: ['security/exploit', 'market/price'], min_severity: 'medium' }
+      });
+    }
+
+    const subId = `dsub_${randomUUID().slice(0, 12)}`;
+    await pool.query(
+      `INSERT INTO delphi_subscriptions (sub_id, webhook_url, filter_types, min_severity)
+       VALUES ($1, $2, $3, $4)`,
+      [subId, webhook_url, filter_types, min_severity]
+    );
+
+    res.status(201).json({
+      subscription_id: subId,
+      webhook_url,
+      filter_types: filter_types.length > 0 ? filter_types : 'all',
+      min_severity,
+      status: 'active',
+      description: 'DELPHI will POST matching signals to your webhook URL as they arrive.',
+      manage: `DELETE /v1/signals/subscribe/${subId} to unsubscribe`,
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Subscription failed', message: e.message });
+  }
+});
+
+// Unsubscribe
+app.delete('/v1/signals/subscribe/:subId', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'UPDATE delphi_subscriptions SET active = false WHERE sub_id = $1 RETURNING sub_id',
+      [req.params.subId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Subscription not found' });
+    }
+    res.json({ unsubscribed: true, subscription_id: req.params.subId });
+  } catch (e) {
+    res.status(500).json({ error: 'Unsubscribe failed', message: e.message });
+  }
+});
+
 // ── Server Start ────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[DELPHI] Intelligence Wire online — port ${PORT}`);
