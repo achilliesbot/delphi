@@ -1,0 +1,99 @@
+{
+  "network": "base",
+  "currency": "USDC",
+  "services": {
+    "signal-query": {
+      "price": "0.002",
+      "description": "Query DELPHI intelligence signals by type (security, market, ecosystem, api-health), severity, time range, or keyword. Returns structured, cryptographically signed signals for autonomous agents.",
+      "methods": ["GET"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "description": "Signal type filter (e.g. market/yield, security/exploit)" },
+            "severity": { "type": "string", "description": "Minimum severity: critical, high, medium, low, info" },
+            "since": { "type": "string", "description": "ISO timestamp — only signals after this time" },
+            "limit": { "type": "number", "description": "Max results (default 20, max 50)" }
+          },
+          "required": []
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "signals": { "type": "array", "description": "Array of signal objects with type, severity, title, data, confidence, signature" },
+            "count": { "type": "number", "description": "Number of signals returned" }
+          }
+        }
+      }
+    },
+    "latest-signals": {
+      "price": "0.001",
+      "description": "Get latest intelligence signals across all categories — market moves, security alerts, ecosystem changes, API health updates. Cheapest entry point to DELPHI.",
+      "methods": ["GET"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "limit": { "type": "number", "description": "Number of signals (default 10, max 50)" }
+          },
+          "required": []
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "signals": { "type": "array", "description": "Latest signals array" },
+            "count": { "type": "number" }
+          }
+        }
+      }
+    },
+    "intelligence-report": {
+      "price": "0.05",
+      "description": "Deep intelligence report synthesized from recent DELPHI signals on any topic. Returns summary, key findings, severity distribution, and related signals.",
+      "methods": ["GET"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "topic": { "type": "string", "description": "Topic to generate report on (required)" }
+          },
+          "required": ["topic"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string", "description": "Synthesized intelligence summary" },
+            "key_findings": { "type": "array", "description": "Top findings" },
+            "signal_count": { "type": "number" }
+          }
+        }
+      }
+    },
+    "publish-signal": {
+      "price": "0.005",
+      "description": "Publish an intelligence signal to the DELPHI network. Publishers earn 70% of query fees when their signals are consumed by other agents.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "description": "Signal type (e.g. security/exploit, market/yield)" },
+            "severity": { "type": "string", "description": "critical, high, medium, low, or info" },
+            "title": { "type": "string", "description": "Human-readable signal title" },
+            "data": { "type": "object", "description": "Structured signal data" },
+            "confidence": { "type": "number", "description": "Confidence 0-1" }
+          },
+          "required": ["type", "title", "data"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "signal_id": { "type": "string" },
+            "published": { "type": "boolean" },
+            "expires_at": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
