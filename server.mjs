@@ -589,6 +589,23 @@ async function logQuery(queryType, filters, signalsReturned, payment) {
   } catch (e) { /* non-critical */ }
 }
 
+// ── Smithery MCP Server Card ────────────────────────────────────────
+app.get('/.well-known/mcp/server-card.json', (req, res) => {
+  res.json({
+    serverInfo: { name: "DELPHI Oracle", version: "0.1.0", description: "Real-time AI-curated intelligence signals and temporal knowledge graph for the agent economy. Covers crypto, DeFi, AI agents, macro, and security events via x402 USDC micropayments on Base Mainnet." },
+    capabilities: { tools: {} },
+    tools: [
+      { name: "delphi_signals_query", description: "Query intelligence signals by type, severity, keyword. $0.002 USDC via x402.", inputSchema: { type: "object", properties: { type: { type: "string" }, severity: { type: "string" }, keyword: { type: "string" }, limit: { type: "number" } } } },
+      { name: "delphi_signals_latest", description: "Get latest signals across all categories. $0.001 USDC.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
+      { name: "delphi_report", description: "Deep intelligence report on a specific topic. $0.05 USDC.", inputSchema: { type: "object", properties: { topic: { type: "string" } }, required: ["topic"] } },
+      { name: "delphi_graph_entity", description: "Knowledge graph entity lookup — all relationships with temporal filtering. $0.003 USDC.", inputSchema: { type: "object", properties: { name: { type: "string" }, direction: { type: "string" } }, required: ["name"] } },
+      { name: "delphi_graph_query", description: "Query knowledge graph by relationship type. $0.005 USDC.", inputSchema: { type: "object", properties: { predicate: { type: "string" }, subject: { type: "string" }, object: { type: "string" } } } },
+      { name: "delphi_graph_timeline", description: "Chronological fact history for any entity. $0.003 USDC.", inputSchema: { type: "object", properties: { entity: { type: "string" }, limit: { type: "number" } }, required: ["entity"] } },
+      { name: "delphi_contradictions", description: "Intelligence contradictions — conflicting facts detected by oracle. $0.005 USDC.", inputSchema: { type: "object", properties: { resolved: { type: "boolean" }, limit: { type: "number" } } } }
+    ]
+  });
+});
+
 // ── FREE ENDPOINTS ──────────────────────────────────────────────────
 
 // Root — agent-readable service manifest
