@@ -54,40 +54,26 @@ const ORACLE_SIGNER = process.env.ORACLE_SIGNER_KEY || 'delphi-oracle-v1';
 // ── Knowledge Graph Init ───────────────────────────────────────────
 async function initKnowledgeGraph() {
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS kg_entities (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        type TEXT DEFAULT 'unknown',
-        properties JSONB DEFAULT '{}',
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS kg_triples (
-        id TEXT PRIMARY KEY,
-        subject TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
-        predicate TEXT NOT NULL,
-        object TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
-        valid_from TIMESTAMPTZ,
-        valid_to TIMESTAMPTZ,
-        confidence REAL DEFAULT 1.0,
-        source_signal TEXT,
-        extracted_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_kg_subject ON kg_triples(subject);
-      CREATE INDEX IF NOT EXISTS idx_kg_object ON kg_triples(object);
-      CREATE INDEX IF NOT EXISTS idx_kg_predicate ON kg_triples(predicate);
-      CREATE INDEX IF NOT EXISTS idx_kg_valid ON kg_triples(valid_from, valid_to);
-
-      CREATE TABLE IF NOT EXISTS kg_contradictions (
-        id TEXT PRIMARY KEY,
-        triple_a TEXT REFERENCES kg_triples(id),
-        triple_b TEXT REFERENCES kg_triples(id),
-        description TEXT,
-        severity TEXT DEFAULT 'medium',
-        resolved BOOLEAN DEFAULT false,
-        detected_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `);
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_entities (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT DEFAULT 'unknown',
+      properties JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_triples (
+      id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      predicate TEXT NOT NULL, object TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      valid_from TIMESTAMPTZ, valid_to TIMESTAMPTZ, confidence REAL DEFAULT 1.0,
+      source_signal TEXT, extracted_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_subject ON kg_triples(subject)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_object ON kg_triples(object)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_predicate ON kg_triples(predicate)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_valid ON kg_triples(valid_from, valid_to)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_contradictions (
+      id TEXT PRIMARY KEY, triple_a TEXT REFERENCES kg_triples(id),
+      triple_b TEXT REFERENCES kg_triples(id), description TEXT,
+      severity TEXT DEFAULT 'medium', resolved BOOLEAN DEFAULT false,
+      detected_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
     console.log('[DELPHI] Knowledge graph tables ready');
   } catch (e) {
     console.warn('[DELPHI] KG init warning:', e.message);
