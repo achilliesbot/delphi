@@ -427,13 +427,42 @@ app.get('/internal/graph/stats', requireInternalKey, async (req, res) => {
 
 // Manual KG init trigger (for debugging)
 app.get('/internal/graph/init', requireInternalKey, async (req, res) => {
+  const steps = [];
   try {
-    await initKnowledgeGraph();
-    const stats = await pool.query('SELECT COUNT(*) as cnt FROM kg_entities');
-    res.json({ success: true, entities: parseInt(stats.rows[0].cnt) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message, stack: e.stack });
-  }
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_entities (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT DEFAULT 'unknown',
+      properties JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    steps.push('kg_entities created');
+  } catch (e) { steps.push('kg_entities FAILED: ' + e.message); }
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_triples (
+      id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      predicate TEXT NOT NULL, object TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      valid_from TIMESTAMPTZ, valid_to TIMESTAMPTZ, confidence REAL DEFAULT 1.0,
+      source_signal TEXT, extracted_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    steps.push('kg_triples created');
+  } catch (e) { steps.push('kg_triples FAILED: ' + e.message); }
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS kg_contradictions (
+      id TEXT PRIMARY KEY, triple_a TEXT, triple_b TEXT, description TEXT,
+      severity TEXT DEFAULT 'medium', resolved BOOLEAN DEFAULT false,
+      detected_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    steps.push('kg_contradictions created');
+  } catch (e) { steps.push('kg_contradictions FAILED: ' + e.message); }
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_subject ON kg_triples(subject)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_object ON kg_triples(object)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kg_predicate ON kg_triples(predicate)`);
+    steps.push('indexes created');
+  } catch (e) { steps.push('indexes FAILED: ' + e.message); }
+  try {
+    const cnt = await pool.query('SELECT COUNT(*) as cnt FROM kg_entities');
+    steps.push('verify OK: ' + cnt.rows[0].cnt + ' entities');
+  } catch (e) { steps.push('verify FAILED: ' + e.message); }
+  res.json({ steps });
 });
 
 app.get('/internal/signals/latest', requireInternalKey, async (req, res) => {
