@@ -862,7 +862,7 @@ app.get('/.well-known/x402.json', (req, res) => {
     wallet: DELPHI_WALLET,
     network: X402_NETWORK,
     currency: 'USDC',
-    facilitator: X402_FACILITATOR,
+    facilitator: 'https://api.cdp.coinbase.com/platform/v2/x402',
     protocol: 'delphi-v1',
     endpoints: [
       {
@@ -947,6 +947,11 @@ app.get('/.well-known/x402.json', (req, res) => {
       }
     ]
   });
+});
+
+// x402 discovery alias (no extension)
+app.get('/.well-known/x402', (req, res) => {
+  res.redirect(301, '/.well-known/x402.json');
 });
 
 // Signal count preview (free — lets agents check before paying)
