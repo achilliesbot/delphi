@@ -720,6 +720,7 @@ app.get('/status', async (req, res) => {
         'GET /openapi.json': 'OpenAPI 3.0 schema for LLM tool-use integration',
         'GET /.well-known/x402.json': 'x402 discovery manifest'
       },
+      plugin: 'https://github.com/achilliesbot/achilles-ep-delphi-plugin-marketplace',
       how_to_use: 'Query signals using an x402-compatible client. Payment is automatic via USDC.',
       timestamp: new Date().toISOString()
     });
@@ -1570,6 +1571,16 @@ app.delete('/v1/signals/subscribe/:subId', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'Unsubscribe failed', message: e.message });
   }
+});
+
+// ── Claude Code Plugin Marketplace Discovery ──────────────────────
+app.get('/.well-known/claude-plugin.json', (req, res) => {
+  res.json({
+    plugin_marketplace: 'achilliesbot/achilles-ep-delphi-plugin-marketplace',
+    install: '/plugin marketplace add achilliesbot/achilles-ep-delphi-plugin-marketplace',
+    plugin: 'achilles-ep-delphi@achilles-ep-delphi-plugins',
+    description: 'DELPHI Oracle intelligence + EP AgentIAM safety — x402 USDC micropayments on Base Mainnet'
+  });
 });
 
 // ── Server Start ────────────────────────────────────────────────────
