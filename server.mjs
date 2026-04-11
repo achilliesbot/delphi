@@ -51,6 +51,274 @@ const X402_NETWORK = process.env.X402_NETWORK || 'eip155:84532';
 const X402_FACILITATOR = process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator';
 const ORACLE_SIGNER = process.env.ORACLE_SIGNER_KEY || 'delphi-oracle-v1';
 
+// ── Knowledge Graph Init ───────────────────────────────────────────
+async function initKnowledgeGraph() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kg_entities (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT DEFAULT 'unknown',
+        properties JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS kg_triples (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+        predicate TEXT NOT NULL,
+        object TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+        valid_from TIMESTAMPTZ,
+        valid_to TIMESTAMPTZ,
+        confidence REAL DEFAULT 1.0,
+        source_signal TEXT,
+        extracted_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_subject ON kg_triples(subject);
+      CREATE INDEX IF NOT EXISTS idx_kg_object ON kg_triples(object);
+      CREATE INDEX IF NOT EXISTS idx_kg_predicate ON kg_triples(predicate);
+      CREATE INDEX IF NOT EXISTS idx_kg_valid ON kg_triples(valid_from, valid_to);
+
+      CREATE TABLE IF NOT EXISTS kg_contradictions (
+        id TEXT PRIMARY KEY,
+        triple_a TEXT REFERENCES kg_triples(id),
+        triple_b TEXT REFERENCES kg_triples(id),
+        description TEXT,
+        severity TEXT DEFAULT 'medium',
+        resolved BOOLEAN DEFAULT false,
+        detected_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    console.log('[DELPHI] Knowledge graph tables ready');
+  } catch (e) {
+    console.warn('[DELPHI] KG init warning:', e.message);
+  }
+}
+initKnowledgeGraph();
+
+// ── Knowledge Graph Helpers ────────────────────────────────────────
+function entityId(name) {
+  return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').slice(0, 128);
+}
+
+async function ensureEntity(name, type = 'unknown', properties = {}) {
+  const eid = entityId(name);
+  await pool.query(
+    `INSERT INTO kg_entities (id, name, type, properties) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO UPDATE SET type = COALESCE(NULLIF($3, 'unknown'), kg_entities.type),
+     properties = kg_entities.properties || $4`,
+    [eid, name, type, JSON.stringify(properties)]
+  );
+  return eid;
+}
+
+async function addTriple(subject, predicate, object, opts = {}) {
+  const subId = await ensureEntity(subject, opts.subjectType);
+  const objId = await ensureEntity(object, opts.objectType);
+  const pred = predicate.toLowerCase().replace(/\s+/g, '_');
+  const tripleId = `t_${subId}_${pred}_${objId}_${Date.now().toString(36)}`;
+
+  // Check for existing identical active triple
+  const existing = await pool.query(
+    `SELECT id FROM kg_triples WHERE subject=$1 AND predicate=$2 AND object=$3 AND valid_to IS NULL LIMIT 1`,
+    [subId, pred, objId]
+  );
+  if (existing.rows.length > 0) return existing.rows[0].id;
+
+  await pool.query(
+    `INSERT INTO kg_triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_signal)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [tripleId, subId, pred, objId, opts.validFrom || new Date().toISOString(), opts.validTo || null,
+     opts.confidence || 1.0, opts.sourceSignal || null]
+  );
+
+  // Check for contradictions after adding
+  await detectContradictions(tripleId, subId, pred, objId);
+
+  return tripleId;
+}
+
+// ── Signal → Triple Extraction ─────────────────────────────────────
+async function extractTriplesFromSignal(signal) {
+  const triples = [];
+  const src = signal.signal_id;
+  const ts = signal.created_at || signal.timestamp || new Date().toISOString();
+  const conf = parseFloat(signal.confidence) || 0.5;
+  const data = typeof signal.data === 'string' ? JSON.parse(signal.data) : (signal.data || {});
+
+  try {
+    // Market signals: asset → priced_at/yields/has_liquidity → value
+    if (signal.type?.startsWith('market/')) {
+      const asset = data.asset || data.token || data.pair || data.symbol;
+      if (asset) {
+        if (data.price !== undefined) {
+          triples.push({ sub: asset, pred: 'priced_at', obj: `$${data.price}`, subType: 'asset', objType: 'value', conf, src, ts });
+        }
+        if (data.yield !== undefined || data.apy !== undefined) {
+          const yld = data.yield || data.apy;
+          triples.push({ sub: asset, pred: 'yields', obj: `${yld}%`, subType: 'asset', objType: 'value', conf, src, ts });
+        }
+        if (data.volume !== undefined) {
+          triples.push({ sub: asset, pred: 'has_volume', obj: `$${data.volume}`, subType: 'asset', objType: 'metric', conf, src, ts });
+        }
+        if (data.protocol) {
+          triples.push({ sub: asset, pred: 'on_protocol', obj: data.protocol, subType: 'asset', objType: 'protocol', conf, src, ts });
+        }
+        if (data.chain) {
+          triples.push({ sub: asset, pred: 'on_chain', obj: data.chain, subType: 'asset', objType: 'chain', conf, src, ts });
+        }
+      }
+    }
+
+    // Security signals: entity → has_vulnerability/exploited_by → threat
+    if (signal.type?.startsWith('security/')) {
+      const target = data.protocol || data.contract || data.project || data.target;
+      const threat = data.exploit || data.vulnerability || data.threat || signal.title;
+      if (target && threat) {
+        const pred = signal.type === 'security/exploit' ? 'exploited_by' :
+                     signal.type === 'security/rugpull' ? 'rugpulled_via' : 'has_vulnerability';
+        triples.push({ sub: target, pred, obj: threat, subType: 'protocol', objType: 'threat', conf, src, ts });
+      }
+      if (data.loss_amount) {
+        triples.push({ sub: target || signal.title, pred: 'lost', obj: `$${data.loss_amount}`, subType: 'protocol', objType: 'value', conf, src, ts });
+      }
+    }
+
+    // Ecosystem signals: entity → launched/funded/provides → service
+    if (signal.type?.startsWith('ecosystem/')) {
+      const entity = data.agent || data.service || data.project || data.name;
+      if (entity) {
+        if (signal.type === 'ecosystem/new-agent') {
+          triples.push({ sub: entity, pred: 'launched_as', obj: 'ai_agent', subType: 'agent', objType: 'concept', conf, src, ts });
+        }
+        if (signal.type === 'ecosystem/new-service') {
+          triples.push({ sub: entity, pred: 'provides', obj: data.service_type || 'service', subType: 'service', objType: 'concept', conf, src, ts });
+        }
+        if (signal.type === 'ecosystem/funding' && data.amount) {
+          triples.push({ sub: entity, pred: 'raised', obj: `$${data.amount}`, subType: 'project', objType: 'value', conf, src, ts });
+        }
+        if (data.chain) {
+          triples.push({ sub: entity, pred: 'deployed_on', obj: data.chain, subType: 'agent', objType: 'chain', conf, src, ts });
+        }
+      }
+    }
+
+    // API health: service → status → state
+    if (signal.type?.startsWith('api-health/')) {
+      const service = data.service || data.endpoint || data.url || signal.title;
+      if (service) {
+        const state = signal.type.split('/')[1]; // down, degraded, recovered
+        triples.push({ sub: service, pred: 'status_is', obj: state, subType: 'service', objType: 'status', conf, src, ts });
+      }
+    }
+
+    // Intelligence signals: topic → related_to/trending_in → context
+    if (signal.type?.startsWith('intelligence/')) {
+      const topic = data.topic || data.subject || signal.title;
+      if (topic && data.sector) {
+        triples.push({ sub: topic, pred: 'trending_in', obj: data.sector, subType: 'topic', objType: 'sector', conf, src, ts });
+      }
+    }
+
+    // Write all extracted triples
+    for (const t of triples) {
+      await addTriple(t.sub, t.pred, t.obj, {
+        subjectType: t.subType, objectType: t.objType,
+        confidence: t.conf, sourceSignal: t.src, validFrom: t.ts
+      });
+    }
+  } catch (e) {
+    console.warn('[DELPHI] Triple extraction error:', e.message);
+  }
+
+  return triples.length;
+}
+
+// ── Contradiction Detection ────────────────────────────────────────
+async function detectContradictions(newTripleId, subject, predicate, object) {
+  try {
+    // Contradiction patterns:
+    // 1. Same subject+predicate with different object (e.g. ETH priced_at $3200 vs ETH priced_at $3100)
+    //    Only flag if both are still valid (valid_to IS NULL) and objects differ significantly
+    // 2. Opposite status (service status_is down vs status_is recovered)
+    const OPPOSITE_PREDICATES = {
+      'status_is:down': 'status_is:recovered',
+      'status_is:recovered': 'status_is:down',
+      'status_is:degraded': 'status_is:recovered',
+    };
+
+    // Check for same-subject same-predicate conflicts
+    const conflicts = await pool.query(
+      `SELECT t.id, t.object, e.name as obj_name, t.confidence, t.extracted_at
+       FROM kg_triples t JOIN kg_entities e ON t.object = e.id
+       WHERE t.subject = $1 AND t.predicate = $2 AND t.object != $3
+         AND t.valid_to IS NULL AND t.id != $4
+       ORDER BY t.extracted_at DESC LIMIT 5`,
+      [subject, predicate, object, newTripleId]
+    );
+
+    for (const conflict of conflicts.rows) {
+      // For price/value predicates, only flag if values are meaningfully different
+      const isValuePred = ['priced_at', 'yields', 'has_volume'].includes(predicate);
+      if (isValuePred) {
+        // Auto-invalidate the older triple (superseded by newer data)
+        await pool.query(
+          `UPDATE kg_triples SET valid_to = NOW() WHERE id = $1`,
+          [conflict.id]
+        );
+        continue;
+      }
+
+      // For status predicates, auto-resolve old status
+      if (predicate === 'status_is') {
+        await pool.query(
+          `UPDATE kg_triples SET valid_to = NOW() WHERE id = $1`,
+          [conflict.id]
+        );
+        continue;
+      }
+
+      // For other predicates, log as contradiction
+      const contId = `c_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+      await pool.query(
+        `INSERT INTO kg_contradictions (id, triple_a, triple_b, description, severity)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [contId, conflict.id, newTripleId,
+         `Conflicting ${predicate}: "${conflict.obj_name}" vs new value for same subject`,
+         'medium']
+      );
+    }
+  } catch (e) {
+    // Non-critical — don't break signal flow
+    console.warn('[DELPHI] Contradiction check error:', e.message);
+  }
+}
+
+// ── Backfill existing signals into KG (runs once on startup) ───────
+async function backfillKnowledgeGraph() {
+  try {
+    // Check if we've already backfilled
+    const count = await pool.query('SELECT COUNT(*) as cnt FROM kg_triples');
+    if (parseInt(count.rows[0].cnt) > 0) {
+      console.log('[DELPHI] Knowledge graph already populated, skipping backfill');
+      return;
+    }
+    const signals = await pool.query(
+      `SELECT signal_id, type, severity, title, data, confidence, created_at
+       FROM delphi_signals ORDER BY created_at ASC LIMIT 500`
+    );
+    let total = 0;
+    for (const sig of signals.rows) {
+      const n = await extractTriplesFromSignal(sig);
+      total += n;
+    }
+    console.log(`[DELPHI] Backfilled ${total} triples from ${signals.rows.length} existing signals`);
+  } catch (e) {
+    console.warn('[DELPHI] Backfill skipped:', e.message);
+  }
+}
+// Delay backfill to not block startup
+setTimeout(backfillKnowledgeGraph, 5000);
+
 const SIGNAL_TYPES = [
   'security/exploit', 'security/vulnerability', 'security/rugpull',
   'market/yield', 'market/price', 'market/liquidity', 'market/launch',
@@ -102,6 +370,74 @@ app.get('/internal/signals/query', requireInternalKey, async (req, res) => {
   } catch (e) { res.status(503).json({ error: 'database_unavailable' }); }
 });
 
+// Internal graph endpoints (bypass x402)
+app.get('/internal/graph/entity', requireInternalKey, async (req, res) => {
+  try {
+    const { name, as_of, direction = 'both' } = req.query;
+    if (!name) return res.status(400).json({ error: 'name parameter required' });
+    const eid = entityId(name);
+    const results = [];
+    const entityRow = await pool.query('SELECT * FROM kg_entities WHERE id = $1', [eid]);
+    if (entityRow.rows.length === 0) return res.json({ entity: name, found: false, relationships: [] });
+    const entity = entityRow.rows[0];
+    const timeFilter = as_of ? ` AND (t.valid_from IS NULL OR t.valid_from <= $2) AND (t.valid_to IS NULL OR t.valid_to >= $2)` : '';
+    const params = as_of ? [eid, as_of] : [eid];
+    if (direction === 'outgoing' || direction === 'both') {
+      const out = await pool.query(`SELECT t.*, e.name as obj_name FROM kg_triples t JOIN kg_entities e ON t.object = e.id WHERE t.subject = $1${timeFilter} ORDER BY t.extracted_at DESC LIMIT 100`, params);
+      out.rows.forEach(r => results.push({ direction: 'outgoing', subject: entity.name, predicate: r.predicate, object: r.obj_name, valid_from: r.valid_from, valid_to: r.valid_to, confidence: parseFloat(r.confidence), current: r.valid_to === null }));
+    }
+    if (direction === 'incoming' || direction === 'both') {
+      const inc = await pool.query(`SELECT t.*, e.name as sub_name FROM kg_triples t JOIN kg_entities e ON t.subject = e.id WHERE t.object = $1${timeFilter} ORDER BY t.extracted_at DESC LIMIT 100`, params);
+      inc.rows.forEach(r => results.push({ direction: 'incoming', subject: r.sub_name, predicate: r.predicate, object: entity.name, valid_from: r.valid_from, valid_to: r.valid_to, confidence: parseFloat(r.confidence), current: r.valid_to === null }));
+    }
+    res.json({ entity: entity.name, entity_type: entity.type, relationship_count: results.length, relationships: results, timestamp: new Date().toISOString() });
+  } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
+app.get('/internal/graph/query', requireInternalKey, async (req, res) => {
+  try {
+    const { predicate, as_of, subject, object, limit = 50 } = req.query;
+    if (!predicate) return res.status(400).json({ error: 'predicate parameter required' });
+    const pred = predicate.toLowerCase().replace(/\s+/g, '_');
+    const maxLimit = Math.min(parseInt(limit) || 50, 100);
+    let where = ['t.predicate = $1'], params = [pred], idx = 2;
+    if (subject) { where.push(`t.subject = $${idx++}`); params.push(entityId(subject)); }
+    if (object) { where.push(`t.object = $${idx++}`); params.push(entityId(object)); }
+    if (as_of) { where.push(`(t.valid_from IS NULL OR t.valid_from <= $${idx})`); where.push(`(t.valid_to IS NULL OR t.valid_to >= $${idx})`); params.push(as_of); idx++; }
+    params.push(maxLimit);
+    const result = await pool.query(`SELECT t.*, s.name as sub_name, o.name as obj_name FROM kg_triples t JOIN kg_entities s ON t.subject = s.id JOIN kg_entities o ON t.object = o.id WHERE ${where.join(' AND ')} ORDER BY t.extracted_at DESC LIMIT $${idx}`, params);
+    res.json({ predicate: pred, count: result.rows.length, triples: result.rows.map(r => ({ subject: r.sub_name, predicate: r.predicate, object: r.obj_name, valid_from: r.valid_from, valid_to: r.valid_to, confidence: parseFloat(r.confidence), current: r.valid_to === null })), timestamp: new Date().toISOString() });
+  } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
+app.get('/internal/graph/timeline', requireInternalKey, async (req, res) => {
+  try {
+    const { entity, limit = 50 } = req.query;
+    if (!entity) return res.status(400).json({ error: 'entity parameter required' });
+    const eid = entityId(entity);
+    const maxLimit = Math.min(parseInt(limit) || 50, 100);
+    const result = await pool.query(`SELECT t.*, s.name as sub_name, o.name as obj_name FROM kg_triples t JOIN kg_entities s ON t.subject = s.id JOIN kg_entities o ON t.object = o.id WHERE (t.subject = $1 OR t.object = $1) ORDER BY t.valid_from ASC NULLS LAST LIMIT $2`, [eid, maxLimit]);
+    res.json({ entity, event_count: result.rows.length, timeline: result.rows.map(r => ({ subject: r.sub_name, predicate: r.predicate, object: r.obj_name, valid_from: r.valid_from, valid_to: r.valid_to, current: r.valid_to === null })), timestamp: new Date().toISOString() });
+  } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
+app.get('/internal/graph/contradictions', requireInternalKey, async (req, res) => {
+  try {
+    const { resolved = 'false', limit = 20 } = req.query;
+    const maxLimit = Math.min(parseInt(limit) || 20, 50);
+    const result = await pool.query(`SELECT c.*, sa.name as a_sub, ta.predicate as a_pred, oa.name as a_obj, sb.name as b_sub, tb.predicate as b_pred, ob.name as b_obj FROM kg_contradictions c JOIN kg_triples ta ON c.triple_a = ta.id JOIN kg_entities sa ON ta.subject = sa.id JOIN kg_entities oa ON ta.object = oa.id JOIN kg_triples tb ON c.triple_b = tb.id JOIN kg_entities sb ON tb.subject = sb.id JOIN kg_entities ob ON tb.object = ob.id WHERE c.resolved = $1 ORDER BY c.detected_at DESC LIMIT $2`, [resolved === 'true', maxLimit]);
+    res.json({ contradictions: result.rows.map(r => ({ id: r.id, description: r.description, severity: r.severity, fact_a: { subject: r.a_sub, predicate: r.a_pred, object: r.a_obj }, fact_b: { subject: r.b_sub, predicate: r.b_pred, object: r.b_obj }, detected_at: r.detected_at })), count: result.rows.length, timestamp: new Date().toISOString() });
+  } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
+app.get('/internal/graph/stats', requireInternalKey, async (req, res) => {
+  try {
+    const stats = await pool.query(`SELECT (SELECT COUNT(*) FROM kg_entities) as entities, (SELECT COUNT(*) FROM kg_triples) as triples, (SELECT COUNT(*) FROM kg_triples WHERE valid_to IS NULL) as current_facts, (SELECT COUNT(*) FROM kg_contradictions WHERE resolved = false) as contradictions`);
+    const s = stats.rows[0];
+    res.json({ entities: parseInt(s.entities), triples: parseInt(s.triples), current_facts: parseInt(s.current_facts), contradictions: parseInt(s.contradictions), timestamp: new Date().toISOString() });
+  } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
 app.get('/internal/signals/latest', requireInternalKey, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 10, 50);
@@ -151,6 +487,26 @@ try {
     'POST /v1/signals/publish': {
       accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
       description: 'Publish a signal to the DELPHI network (earn 70% when consumed)',
+      mimeType: 'application/json'
+    },
+    'GET /v1/graph/entity': {
+      accepts: [{ scheme: 'exact', price: '$0.003', network: X402_NETWORK, payTo: DELPHI_WALLET }],
+      description: 'Query temporal knowledge graph — all relationships for an entity',
+      mimeType: 'application/json'
+    },
+    'GET /v1/graph/query': {
+      accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
+      description: 'Query knowledge graph by relationship type with temporal filtering',
+      mimeType: 'application/json'
+    },
+    'GET /v1/graph/timeline': {
+      accepts: [{ scheme: 'exact', price: '$0.003', network: X402_NETWORK, payTo: DELPHI_WALLET }],
+      description: 'Chronological fact history for any entity in the knowledge graph',
+      mimeType: 'application/json'
+    },
+    'GET /v1/graph/contradictions': {
+      accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
+      description: 'Unresolved intelligence contradictions — high-value signal conflicts',
       mimeType: 'application/json'
     }
   };
@@ -205,7 +561,14 @@ app.get('/', (req, res) => {
       cheapest_endpoint: { path: '/v1/signals/latest', price: '$0.001', method: 'GET' },
       full_query: { path: '/v1/signals/query', price: '$0.002', method: 'GET', params: ['type', 'severity', 'since', 'keyword', 'limit'] },
       deep_report: { path: '/v1/signals/report', price: '$0.05', method: 'GET', params: ['topic'] },
-      publish: { path: '/v1/signals/publish', price: '$0.005', method: 'POST', revenue_share: '70% of query fees' }
+      publish: { path: '/v1/signals/publish', price: '$0.005', method: 'POST', revenue_share: '70% of query fees' },
+      knowledge_graph: {
+        stats: { path: '/v1/graph/stats', price: 'FREE', method: 'GET' },
+        entity: { path: '/v1/graph/entity', price: '$0.003', method: 'GET', params: ['name', 'as_of', 'direction'] },
+        query: { path: '/v1/graph/query', price: '$0.005', method: 'GET', params: ['predicate', 'subject', 'object', 'as_of'] },
+        timeline: { path: '/v1/graph/timeline', price: '$0.003', method: 'GET', params: ['entity', 'limit'] },
+        contradictions: { path: '/v1/graph/contradictions', price: '$0.005', method: 'GET', params: ['resolved', 'limit'] }
+      }
     },
     payment: {
       protocol: 'x402',
@@ -272,7 +635,11 @@ app.get('/status', async (req, res) => {
         'GET /v1/signals/query': '$0.002 — Query by type, severity, time',
         'GET /v1/signals/latest': '$0.001 — Latest signals across all categories',
         'GET /v1/signals/report': '$0.05 — Deep intelligence report',
-        'POST /v1/signals/publish': '$0.005 — Publish a signal (earn 70% on consumption)'
+        'POST /v1/signals/publish': '$0.005 — Publish a signal (earn 70% on consumption)',
+        'GET /v1/graph/entity': '$0.003 — Entity relationships from temporal knowledge graph',
+        'GET /v1/graph/query': '$0.005 — Query knowledge graph by relationship type',
+        'GET /v1/graph/timeline': '$0.003 — Chronological entity history',
+        'GET /v1/graph/contradictions': '$0.005 — Intelligence contradictions (high-value)'
       },
       free_endpoints: {
         'GET /': 'Agent-readable service manifest',
@@ -282,6 +649,7 @@ app.get('/status', async (req, res) => {
         'GET /v1/signals/categories': 'Live category tree with signal counts',
         'GET /v1/signals/count': 'Preview signal count before paying (supports type/severity/since filters)',
         'GET /v1/network': 'Network stats and signal distribution',
+        'GET /v1/graph/stats': 'Knowledge graph stats — entity/triple counts, relationship types',
         'GET /openapi.json': 'OpenAPI 3.0 schema for LLM tool-use integration',
         'GET /.well-known/x402.json': 'x402 discovery manifest'
       },
@@ -468,6 +836,46 @@ app.get('/.well-known/x402.json', (req, res) => {
         category: 'ai/intelligence',
         input: { type: 'application/json', fields: { type: 'string (signal type)', severity: 'string', title: 'string', data: 'object', confidence: 'number 0-1' } },
         output: { type: 'application/json', fields: { signal_id: 'string', published: 'boolean', expires_at: 'string' } }
+      },
+      {
+        path: '/v1/graph/entity',
+        method: 'GET',
+        price: '0.003',
+        currency: 'USDC',
+        description: 'Query the temporal knowledge graph for all relationships involving an entity. Supports time-travel queries via as_of parameter.',
+        category: 'ai/knowledge-graph',
+        input: { type: 'query_params', fields: { name: 'string (entity name, required)', as_of: 'ISO timestamp (optional — time-travel)', direction: 'outgoing|incoming|both (default: both)' } },
+        output: { type: 'application/json', fields: { entity: 'string', relationships: 'array of relationship objects', relationship_count: 'number' } }
+      },
+      {
+        path: '/v1/graph/query',
+        method: 'GET',
+        price: '0.005',
+        currency: 'USDC',
+        description: 'Query knowledge graph by relationship type (predicate). Find all entities connected by a specific relationship.',
+        category: 'ai/knowledge-graph',
+        input: { type: 'query_params', fields: { predicate: 'string (required)', subject: 'string (optional filter)', object: 'string (optional filter)', as_of: 'ISO timestamp' } },
+        output: { type: 'application/json', fields: { triples: 'array', count: 'number' } }
+      },
+      {
+        path: '/v1/graph/timeline',
+        method: 'GET',
+        price: '0.003',
+        currency: 'USDC',
+        description: 'Chronological fact history for an entity. See how knowledge evolved over time.',
+        category: 'ai/knowledge-graph',
+        input: { type: 'query_params', fields: { entity: 'string (required)', limit: 'number (default 50)' } },
+        output: { type: 'application/json', fields: { timeline: 'array', event_count: 'number' } }
+      },
+      {
+        path: '/v1/graph/contradictions',
+        method: 'GET',
+        price: '0.005',
+        currency: 'USDC',
+        description: 'Unresolved contradictions in the intelligence graph. High-value signals where conflicting facts exist.',
+        category: 'ai/knowledge-graph',
+        input: { type: 'query_params', fields: { resolved: 'boolean (default false)', limit: 'number (default 20)' } },
+        output: { type: 'application/json', fields: { contradictions: 'array', count: 'number' } }
       }
     ]
   });
@@ -731,6 +1139,15 @@ app.post('/v1/signals/publish', async (req, res) => {
       );
     }
 
+    // Extract knowledge graph triples from the new signal
+    let triplesExtracted = 0;
+    try {
+      triplesExtracted = await extractTriplesFromSignal({
+        signal_id: signalId, type, severity, title, data, confidence,
+        created_at: new Date().toISOString()
+      });
+    } catch (kgErr) { /* non-critical */ }
+
     res.status(201).json({
       published: true,
       signal_id: signalId,
@@ -739,6 +1156,7 @@ app.post('/v1/signals/publish', async (req, res) => {
       title,
       signature,
       expires_at: expiresAt.toISOString(),
+      knowledge_graph: { triples_extracted: triplesExtracted },
       publisher_revenue_share: '70% of query fees when this signal is consumed',
       network: 'delphi-v1',
       timestamp: new Date().toISOString()
@@ -793,6 +1211,245 @@ app.get('/v1/network', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: 'Stats failed', message: e.message });
+  }
+});
+
+// ── KNOWLEDGE GRAPH ENDPOINTS ──────────────────────────────────────
+
+// Graph stats (free) — lets agents know the graph exists
+app.get('/v1/graph/stats', async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM kg_entities) as entities,
+        (SELECT COUNT(*) FROM kg_triples) as triples,
+        (SELECT COUNT(*) FROM kg_triples WHERE valid_to IS NULL) as current_facts,
+        (SELECT COUNT(*) FROM kg_triples WHERE valid_to IS NOT NULL) as expired_facts,
+        (SELECT COUNT(*) FROM kg_contradictions WHERE resolved = false) as unresolved_contradictions
+    `);
+    const s = stats.rows[0];
+
+    const preds = await pool.query(
+      `SELECT DISTINCT predicate FROM kg_triples ORDER BY predicate`
+    );
+
+    res.json({
+      knowledge_graph: {
+        entities: parseInt(s.entities),
+        triples: parseInt(s.triples),
+        current_facts: parseInt(s.current_facts),
+        expired_facts: parseInt(s.expired_facts),
+        relationship_types: preds.rows.map(r => r.predicate),
+        unresolved_contradictions: parseInt(s.unresolved_contradictions)
+      },
+      description: 'Temporal knowledge graph built from DELPHI signals. Query entities, relationships, and timelines.',
+      endpoints: {
+        'GET /v1/graph/entity?name=ETH': '$0.003 — All relationships for an entity',
+        'GET /v1/graph/query?predicate=priced_at': '$0.005 — Query by relationship type',
+        'GET /v1/graph/timeline?entity=ETH': '$0.003 — Chronological fact history',
+        'GET /v1/graph/contradictions': '$0.005 — Unresolved contradictions (high-value intelligence)'
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.json({ knowledge_graph: { entities: 0, triples: 0 }, error: e.message, timestamp: new Date().toISOString() });
+  }
+});
+
+// Entity query ($0.003) — all relationships for an entity
+app.get('/v1/graph/entity', async (req, res) => {
+  try {
+    const { name, as_of, direction = 'both' } = req.query;
+    if (!name) return res.status(400).json({ error: 'name parameter required' });
+
+    const eid = entityId(name);
+    const results = [];
+
+    // Get entity info
+    const entityRow = await pool.query('SELECT * FROM kg_entities WHERE id = $1', [eid]);
+    if (entityRow.rows.length === 0) {
+      return res.json({ entity: name, found: false, relationships: [], timestamp: new Date().toISOString() });
+    }
+
+    const entity = entityRow.rows[0];
+    const timeFilter = as_of
+      ? ` AND (t.valid_from IS NULL OR t.valid_from <= $2) AND (t.valid_to IS NULL OR t.valid_to >= $2)`
+      : '';
+    const params = as_of ? [eid, as_of] : [eid];
+
+    if (direction === 'outgoing' || direction === 'both') {
+      const out = await pool.query(
+        `SELECT t.*, e.name as obj_name, e.type as obj_type FROM kg_triples t
+         JOIN kg_entities e ON t.object = e.id
+         WHERE t.subject = $1${timeFilter} ORDER BY t.extracted_at DESC LIMIT 100`, params
+      );
+      out.rows.forEach(r => results.push({
+        direction: 'outgoing', subject: entity.name, predicate: r.predicate, object: r.obj_name,
+        object_type: r.obj_type, valid_from: r.valid_from, valid_to: r.valid_to,
+        confidence: parseFloat(r.confidence), current: r.valid_to === null, source_signal: r.source_signal
+      }));
+    }
+
+    if (direction === 'incoming' || direction === 'both') {
+      const inc = await pool.query(
+        `SELECT t.*, e.name as sub_name, e.type as sub_type FROM kg_triples t
+         JOIN kg_entities e ON t.subject = e.id
+         WHERE t.object = $1${timeFilter} ORDER BY t.extracted_at DESC LIMIT 100`, params
+      );
+      inc.rows.forEach(r => results.push({
+        direction: 'incoming', subject: r.sub_name, subject_type: r.sub_type,
+        predicate: r.predicate, object: entity.name,
+        valid_from: r.valid_from, valid_to: r.valid_to,
+        confidence: parseFloat(r.confidence), current: r.valid_to === null, source_signal: r.source_signal
+      }));
+    }
+
+    await logQuery('graph_entity', { name, as_of, direction }, results.length, 0.003);
+
+    res.json({
+      entity: entity.name,
+      entity_type: entity.type,
+      properties: entity.properties,
+      as_of: as_of || 'current',
+      relationship_count: results.length,
+      relationships: results,
+      network: 'delphi-v1',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Graph query failed', message: e.message });
+  }
+});
+
+// Relationship query ($0.005) — all triples with a given predicate
+app.get('/v1/graph/query', async (req, res) => {
+  try {
+    const { predicate, as_of, subject, object, limit = 50 } = req.query;
+    if (!predicate) return res.status(400).json({ error: 'predicate parameter required' });
+
+    const pred = predicate.toLowerCase().replace(/\s+/g, '_');
+    const maxLimit = Math.min(parseInt(limit) || 50, 100);
+    let where = ['t.predicate = $1'];
+    let params = [pred];
+    let idx = 2;
+
+    if (subject) { where.push(`t.subject = $${idx++}`); params.push(entityId(subject)); }
+    if (object) { where.push(`t.object = $${idx++}`); params.push(entityId(object)); }
+    if (as_of) {
+      where.push(`(t.valid_from IS NULL OR t.valid_from <= $${idx})`);
+      where.push(`(t.valid_to IS NULL OR t.valid_to >= $${idx})`);
+      params.push(as_of); idx++;
+    }
+
+    params.push(maxLimit);
+
+    const result = await pool.query(
+      `SELECT t.*, s.name as sub_name, s.type as sub_type, o.name as obj_name, o.type as obj_type
+       FROM kg_triples t
+       JOIN kg_entities s ON t.subject = s.id
+       JOIN kg_entities o ON t.object = o.id
+       WHERE ${where.join(' AND ')}
+       ORDER BY t.extracted_at DESC LIMIT $${idx}`, params
+    );
+
+    await logQuery('graph_query', { predicate, subject, object, as_of }, result.rows.length, 0.005);
+
+    res.json({
+      predicate: pred,
+      count: result.rows.length,
+      triples: result.rows.map(r => ({
+        subject: r.sub_name, subject_type: r.sub_type,
+        predicate: r.predicate,
+        object: r.obj_name, object_type: r.obj_type,
+        valid_from: r.valid_from, valid_to: r.valid_to,
+        confidence: parseFloat(r.confidence), current: r.valid_to === null
+      })),
+      network: 'delphi-v1',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Graph query failed', message: e.message });
+  }
+});
+
+// Timeline ($0.003) — chronological fact history for an entity
+app.get('/v1/graph/timeline', async (req, res) => {
+  try {
+    const { entity, limit = 50 } = req.query;
+    if (!entity) return res.status(400).json({ error: 'entity parameter required' });
+
+    const eid = entityId(entity);
+    const maxLimit = Math.min(parseInt(limit) || 50, 100);
+
+    const result = await pool.query(
+      `SELECT t.*, s.name as sub_name, o.name as obj_name
+       FROM kg_triples t
+       JOIN kg_entities s ON t.subject = s.id
+       JOIN kg_entities o ON t.object = o.id
+       WHERE (t.subject = $1 OR t.object = $1)
+       ORDER BY t.valid_from ASC NULLS LAST LIMIT $2`,
+      [eid, maxLimit]
+    );
+
+    await logQuery('graph_timeline', { entity }, result.rows.length, 0.003);
+
+    res.json({
+      entity,
+      event_count: result.rows.length,
+      timeline: result.rows.map(r => ({
+        subject: r.sub_name, predicate: r.predicate, object: r.obj_name,
+        valid_from: r.valid_from, valid_to: r.valid_to,
+        current: r.valid_to === null, confidence: parseFloat(r.confidence)
+      })),
+      network: 'delphi-v1',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Timeline query failed', message: e.message });
+  }
+});
+
+// Contradictions ($0.005) — unresolved conflicts in intelligence
+app.get('/v1/graph/contradictions', async (req, res) => {
+  try {
+    const { resolved = 'false', limit = 20 } = req.query;
+    const showResolved = resolved === 'true';
+    const maxLimit = Math.min(parseInt(limit) || 20, 50);
+
+    const result = await pool.query(
+      `SELECT c.*,
+              sa.name as a_sub_name, ta.predicate as a_pred, oa.name as a_obj_name,
+              sb.name as b_sub_name, tb.predicate as b_pred, ob.name as b_obj_name
+       FROM kg_contradictions c
+       JOIN kg_triples ta ON c.triple_a = ta.id
+       JOIN kg_entities sa ON ta.subject = sa.id
+       JOIN kg_entities oa ON ta.object = oa.id
+       JOIN kg_triples tb ON c.triple_b = tb.id
+       JOIN kg_entities sb ON tb.subject = sb.id
+       JOIN kg_entities ob ON tb.object = ob.id
+       WHERE c.resolved = $1
+       ORDER BY c.detected_at DESC LIMIT $2`,
+      [showResolved, maxLimit]
+    );
+
+    await logQuery('graph_contradictions', { resolved }, result.rows.length, 0.005);
+
+    res.json({
+      contradictions: result.rows.map(r => ({
+        id: r.id,
+        description: r.description,
+        severity: r.severity,
+        resolved: r.resolved,
+        detected_at: r.detected_at,
+        fact_a: { subject: r.a_sub_name, predicate: r.a_pred, object: r.a_obj_name },
+        fact_b: { subject: r.b_sub_name, predicate: r.b_pred, object: r.b_obj_name }
+      })),
+      count: result.rows.length,
+      network: 'delphi-v1',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Contradiction query failed', message: e.message });
   }
 });
 
