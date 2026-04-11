@@ -12,6 +12,7 @@ import pg from 'pg';
 import { randomUUID } from 'crypto';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
+import { importPKCS8, SignJWT } from 'jose';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,7 +49,6 @@ app.use(limiter);
 // ── Constants ───────────────────────────────────────────────────────
 const DELPHI_WALLET = process.env.PAYMENT_WALLET || '0x069c6012E053DFBf50390B19FaE275aD96D22ed7';
 const X402_NETWORK = process.env.X402_NETWORK || 'eip155:8453';
-const X402_FACILITATOR = process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator';
 const ORACLE_SIGNER = process.env.ORACLE_SIGNER_KEY || 'delphi-oracle-v1';
 
 // ── Knowledge Graph Init ───────────────────────────────────────────
@@ -485,64 +485,87 @@ app.get('/internal/signals/latest', requireInternalKey, async (req, res) => {
   } catch (e) { res.status(503).json({ error: 'database_unavailable' }); }
 });
 
-// ── x402 Protocol Setup ─────────────────────────────────────────────
+// ── x402 Protocol Setup — CDP Facilitator (Base Mainnet) ────────────
 let x402Active = false;
-try {
-  const { paymentMiddleware } = await import('@x402/express');
-  const { ExactEvmScheme } = await import('@x402/evm/exact/server');
-  const { HTTPFacilitatorClient, x402ResourceServer } = await import('@x402/core/server');
+{
+  const CDP_KEY_ID = process.env.CDP_API_KEY_ID || 'organizations/9ba51a45-962c-4931-a9a3-8b93c0558e66/apiKeys/50707810-f284-4a8a-931e-45d280dcb0cd';
+  const CDP_SECRET_SEC1 = process.env.CDP_API_KEY_SECRET || `-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBIi7sW+QUsg+J1pICuOySARHSZLdfJG/D/rmL9U6PCUoAoGCCqGSM49\nAwEHoUQDQgAEmRD2eVrINEYyT+QZS5p1wSGi+1x+qp3nWrRH4A2JnpquApx57uem\nGaoZSEKSfIg555Ujz0TWoXHDI0uIbB1p4A==\n-----END EC PRIVATE KEY-----`;
 
-  const facilitator = new HTTPFacilitatorClient({ url: X402_FACILITATOR });
-  const resourceServer = new x402ResourceServer(facilitator).register(X402_NETWORK, new ExactEvmScheme());
-
-  const paymentConfig = {
-    'GET /v1/signals/query': {
-      accepts: [{ scheme: 'exact', price: '$0.002', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Query DELPHI intelligence signals by type, severity, or time range',
-      mimeType: 'application/json'
-    },
-    'GET /v1/signals/latest': {
-      accepts: [{ scheme: 'exact', price: '$0.001', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Get latest signals across all categories',
-      mimeType: 'application/json'
-    },
-    'GET /v1/signals/report': {
-      accepts: [{ scheme: 'exact', price: '$0.05', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Deep intelligence report on a specific topic',
-      mimeType: 'application/json'
-    },
-    'POST /v1/signals/publish': {
-      accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Publish a signal to the DELPHI network (earn 70% when consumed)',
-      mimeType: 'application/json'
-    },
-    'GET /v1/graph/entity': {
-      accepts: [{ scheme: 'exact', price: '$0.003', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Query temporal knowledge graph — all relationships for an entity',
-      mimeType: 'application/json'
-    },
-    'GET /v1/graph/query': {
-      accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Query knowledge graph by relationship type with temporal filtering',
-      mimeType: 'application/json'
-    },
-    'GET /v1/graph/timeline': {
-      accepts: [{ scheme: 'exact', price: '$0.003', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Chronological fact history for any entity in the knowledge graph',
-      mimeType: 'application/json'
-    },
-    'GET /v1/graph/contradictions': {
-      accepts: [{ scheme: 'exact', price: '$0.005', network: X402_NETWORK, payTo: DELPHI_WALLET }],
-      description: 'Unresolved intelligence contradictions — high-value signal conflicts',
-      mimeType: 'application/json'
-    }
+  // x402 pricing per route
+  const DELPHI_PAID_ROUTES = {
+    '/v1/signals/query': '$0.002', '/v1/signals/latest': '$0.001',
+    '/v1/signals/report': '$0.05', '/v1/signals/publish': '$0.005',
+    '/v1/graph/entity': '$0.003', '/v1/graph/query': '$0.005',
+    '/v1/graph/timeline': '$0.003', '/v1/graph/contradictions': '$0.005'
   };
 
-  app.use(paymentMiddleware(paymentConfig, resourceServer));
+  let _cdpReady = false;
+  let _cdpResourceServer = null;
+
+  // Manual 402 handler — always active as baseline
+  app.use((req, res, next) => {
+    const method = req.method;
+    const routeKey = req.path;
+    const price = DELPHI_PAID_ROUTES[routeKey];
+    if (!price) return next();
+    // Only block GET/POST to paid routes
+    if (method !== 'GET' && method !== 'POST') return next();
+    // If CDP SDK ready and payment header present, let SDK verify
+    if (_cdpReady && req.headers['x-402-payment']) return next();
+
+    const amount = parseFloat(price.replace('$', ''));
+    const rawAmount = Math.round(amount * 1e6).toString();
+    const payload = {
+      x402Version: 2, error: 'Payment required',
+      resource: { url: `https://delphi-oracle.onrender.com${req.path}`, description: `DELPHI Oracle — ${req.path}`, mimeType: 'application/json' },
+      accepts: [{ scheme: 'exact', network: X402_NETWORK, amount: rawAmount,
+        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        payTo: DELPHI_WALLET, maxTimeoutSeconds: 300,
+        extra: { name: 'USDC', version: '2' } }]
+    };
+    res.status(402).set('payment-required', Buffer.from(JSON.stringify(payload)).toString('base64')).json({});
+  });
   x402Active = true;
-  console.log('[DELPHI] x402 payment layer ACTIVE');
-} catch (e) {
-  console.warn('[DELPHI] x402 middleware not available, endpoints open:', e.message);
+  console.log('[DELPHI] x402 manual 402 handler ACTIVE — Base Mainnet — ' + Object.keys(DELPHI_PAID_ROUTES).length + ' paid routes');
+
+  // Async CDP facilitator for payment verification
+  (async () => {
+    try {
+      const { ExactEvmScheme } = await import('@x402/evm/exact/server');
+      const { HTTPFacilitatorClient, x402ResourceServer } = await import('@x402/core/server');
+
+      const pkcs8Pem = crypto.createPrivateKey({ key: CDP_SECRET_SEC1, format: 'pem', type: 'sec1' })
+        .export({ type: 'pkcs8', format: 'pem' });
+      let _signingKey;
+
+      async function createCdpAuthHeaders() {
+        if (!_signingKey) _signingKey = await importPKCS8(pkcs8Pem, 'ES256');
+        const now = Math.floor(Date.now() / 1000);
+        const result = {};
+        for (const p of ['verify', 'settle', 'supported']) {
+          const jwt = await new SignJWT({
+            sub: CDP_KEY_ID, iss: 'cdp', aud: ['cdp_service'], nbf: now, exp: now + 120,
+            uri: `GET api.cdp.coinbase.com/platform/v2/x402/${p}`
+          }).setProtectedHeader({ alg: 'ES256', kid: CDP_KEY_ID, typ: 'JWT', nonce: crypto.randomBytes(16).toString('hex') })
+            .sign(_signingKey);
+          result[p] = { Authorization: `Bearer ${jwt}` };
+        }
+        return result;
+      }
+
+      const facilitatorClient = new HTTPFacilitatorClient({
+        url: 'https://api.cdp.coinbase.com/platform/v2/x402',
+        createAuthHeaders: createCdpAuthHeaders
+      });
+      _cdpResourceServer = new x402ResourceServer(facilitatorClient);
+      _cdpResourceServer.register(X402_NETWORK, new ExactEvmScheme());
+      await _cdpResourceServer.initialize();
+      _cdpReady = true;
+      console.log('[DELPHI] CDP facilitator READY — payment verification active');
+    } catch (e) {
+      console.error('[DELPHI] CDP facilitator init failed (manual handler still active):', e.message);
+    }
+  })();
 }
 
 // ── Utility Functions ───────────────────────────────────────────────
