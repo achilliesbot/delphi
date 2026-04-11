@@ -61,6 +61,67 @@ const SIGNAL_TYPES = [
 
 const SEVERITY_LEVELS = ['critical', 'high', 'medium', 'low', 'info'];
 
+// ── Internal API (bypasses x402, requires key) ─────────────────────
+const DELPHI_INTERNAL_KEY = process.env.DELPHI_INTERNAL_KEY || 'delphi_achilles_internal_2026';
+
+function requireInternalKey(req, res, next) {
+  if (req.headers['x-delphi-internal'] !== DELPHI_INTERNAL_KEY) {
+    return res.status(403).json({ error: 'Invalid internal key' });
+  }
+  next();
+}
+
+app.get('/internal/signals/query', requireInternalKey, async (req, res) => {
+  try {
+    const { type, severity, since, limit = 20, keyword } = req.query;
+    const maxLimit = Math.min(parseInt(limit) || 20, 50);
+    let where = ['1=1'], params = [], idx = 1;
+    if (type) { where.push(`type = $${idx++}`); params.push(type); }
+    if (severity) {
+      const sevIdx = SEVERITY_LEVELS.indexOf(severity);
+      if (sevIdx >= 0) { where.push(`severity = ANY($${idx++})`); params.push(SEVERITY_LEVELS.slice(0, sevIdx + 1)); }
+    }
+    if (since) { where.push(`created_at >= $${idx++}`); params.push(since); }
+    if (keyword) { where.push(`(title ILIKE $${idx} OR data::text ILIKE $${idx})`); params.push(`%${keyword}%`); idx++; }
+    where.push(`(expires_at IS NULL OR expires_at > NOW())`);
+    params.push(maxLimit);
+    const result = await pool.query(
+      `SELECT signal_id, type, severity, title, data, confidence, source, signature, created_at, expires_at
+       FROM delphi_signals WHERE ${where.join(' AND ')} ORDER BY created_at DESC LIMIT $${idx}`, params
+    );
+    res.json({
+      query_id: `dq_${randomUUID().slice(0, 12)}`,
+      count: result.rows.length,
+      signals: result.rows.map(r => ({
+        signal_id: r.signal_id, type: r.type, severity: r.severity, title: r.title,
+        data: r.data, confidence: parseFloat(r.confidence), source: r.source,
+        signature: r.signature, timestamp: r.created_at, expires: r.expires_at
+      })),
+      network: 'delphi-v1', timestamp: new Date().toISOString()
+    });
+  } catch (e) { res.status(503).json({ error: 'database_unavailable' }); }
+});
+
+app.get('/internal/signals/latest', requireInternalKey, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const result = await pool.query(
+      `SELECT signal_id, type, severity, title, data, confidence, source, signature, created_at
+       FROM delphi_signals WHERE (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY created_at DESC LIMIT $1`, [limit]
+    );
+    res.json({
+      count: result.rows.length,
+      signals: result.rows.map(r => ({
+        signal_id: r.signal_id, type: r.type, severity: r.severity, title: r.title,
+        data: r.data, confidence: parseFloat(r.confidence), source: r.source,
+        timestamp: r.created_at
+      })),
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) { res.status(503).json({ error: 'database_unavailable' }); }
+});
+
 // ── x402 Protocol Setup ─────────────────────────────────────────────
 let x402Active = false;
 try {

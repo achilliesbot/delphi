@@ -69,6 +69,132 @@
         }
       }
     },
+    "noleak": {
+      "price": "0.01",
+      "description": "Execution integrity verification for AI agents. Checks for data leaks, unauthorized state changes, and integrity violations before any action. Returns clean/dirty status with threat list and confidence score.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Agent identifier (required)" },
+            "action": { "type": "string", "description": "Action to verify" },
+            "context": { "type": "object", "description": "Additional context" }
+          },
+          "required": ["agent_id"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "clean": { "type": "boolean", "description": "Whether execution is clean" },
+            "threats": { "type": "array", "description": "List of detected threats" },
+            "confidence": { "type": "number", "description": "Confidence score 0-1" },
+            "proof_hash": { "type": "string", "description": "Cryptographic proof hash" }
+          }
+        }
+      }
+    },
+    "memguard": {
+      "price": "0.01",
+      "description": "Memory state verification — detects drift, corruption, and unauthorized modifications in agent memory. Compare current state against baseline snapshots.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Agent identifier (required)" },
+            "memory_hash": { "type": "string", "description": "Current memory state hash" },
+            "expected_state": { "type": "string", "description": "Expected operational state" }
+          },
+          "required": ["agent_id"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "description": "verified or failed" },
+            "drift_detected": { "type": "boolean" },
+            "corruption_detected": { "type": "boolean" },
+            "unauthorized_mod": { "type": "boolean" },
+            "integrity_score": { "type": "number", "description": "Score 0-1" }
+          }
+        }
+      }
+    },
+    "riskoracle": {
+      "price": "0.01",
+      "description": "Pre-action risk scoring for AI agent decisions. Evaluates proposed actions by type, value, and context. Returns risk score, recommendation, and contributing factors.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Agent identifier (required)" },
+            "action": { "type": "string", "description": "Proposed action to evaluate" },
+            "value": { "type": "number", "description": "Value involved in the action" },
+            "context": { "type": "object", "description": "Additional context" }
+          },
+          "required": ["agent_id", "action"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "risk_score": { "type": "number", "description": "Risk score 0-1" },
+            "recommendation": { "type": "string", "description": "proceed, caution, or block" },
+            "factors": { "type": "array", "description": "Contributing risk factors" }
+          }
+        }
+      }
+    },
+    "secureexec": {
+      "price": "0.01",
+      "description": "Tool execution security — validates tool calls before execution. Checks for injection, unauthorized access, and unsafe patterns.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Agent identifier (required)" },
+            "tool": { "type": "string", "description": "Tool being called" },
+            "args": { "type": "array", "description": "Tool arguments" }
+          },
+          "required": ["agent_id", "tool"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "safe": { "type": "boolean", "description": "Whether execution is safe" },
+            "threats": { "type": "array", "description": "Detected threats" },
+            "execution_allowed": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "flowcore": {
+      "price": "0.02",
+      "description": "Full orchestration pipeline — runs integrity check, memory verification, risk scoring, and execution security in a single call. Most comprehensive verification for agent actions.",
+      "methods": ["POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Agent identifier (required)" },
+            "action": { "type": "string", "description": "Action to verify" },
+            "value": { "type": "number", "description": "Value involved" },
+            "memory_hash": { "type": "string", "description": "Current memory hash" }
+          },
+          "required": ["agent_id", "action"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "approved": { "type": "boolean", "description": "Whether action is approved" },
+            "risk_score": { "type": "number" },
+            "integrity": { "type": "string" },
+            "pipeline_hash": { "type": "string", "description": "Pipeline verification hash" }
+          }
+        }
+      }
+    },
     "publish-signal": {
       "price": "0.005",
       "description": "Publish an intelligence signal to the DELPHI network. Publishers earn 70% of query fees when their signals are consumed by other agents.",
