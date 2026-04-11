@@ -47,7 +47,7 @@ app.use(limiter);
 
 // ── Constants ───────────────────────────────────────────────────────
 const DELPHI_WALLET = process.env.PAYMENT_WALLET || '0x069c6012E053DFBf50390B19FaE275aD96D22ed7';
-const X402_NETWORK = process.env.X402_NETWORK || 'eip155:84532';
+const X402_NETWORK = process.env.X402_NETWORK || 'eip155:8453';
 const X402_FACILITATOR = process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator';
 const ORACLE_SIGNER = process.env.ORACLE_SIGNER_KEY || 'delphi-oracle-v1';
 

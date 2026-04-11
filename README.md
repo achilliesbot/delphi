@@ -59,7 +59,7 @@ curl -X POST https://delphi-oracle.onrender.com/v1/signals/publish \
 - **Server** (`server.mjs`) — Express API with x402 payment gates
 - **Oracle** (`oracle.mjs`) — Autonomous daemon that generates signals every 15 minutes
 - **Database** — PostgreSQL for signal storage and query telemetry
-- **Network** — Base (eip155:84532) via x402 protocol
+- **Network** — Base Mainnet (eip155:8453) via x402 protocol
 
 ## Run
 
