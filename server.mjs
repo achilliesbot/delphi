@@ -76,10 +76,11 @@ async function initKnowledgeGraph() {
     )`);
     console.log('[DELPHI] Knowledge graph tables ready');
   } catch (e) {
-    console.warn('[DELPHI] KG init warning:', e.message);
+    console.error('[DELPHI] KG init FAILED:', e.message, e.stack);
   }
 }
-initKnowledgeGraph();
+// Init KG after confirming DB connection
+pool.query('SELECT 1').then(() => initKnowledgeGraph()).catch(e => console.warn('[DELPHI] DB not ready for KG init:', e.message));
 
 // ── Knowledge Graph Helpers ────────────────────────────────────────
 function entityId(name) {
@@ -422,6 +423,17 @@ app.get('/internal/graph/stats', requireInternalKey, async (req, res) => {
     const s = stats.rows[0];
     res.json({ entities: parseInt(s.entities), triples: parseInt(s.triples), current_facts: parseInt(s.current_facts), contradictions: parseInt(s.contradictions), timestamp: new Date().toISOString() });
   } catch (e) { res.status(503).json({ error: 'graph_unavailable' }); }
+});
+
+// Manual KG init trigger (for debugging)
+app.get('/internal/graph/init', requireInternalKey, async (req, res) => {
+  try {
+    await initKnowledgeGraph();
+    const stats = await pool.query('SELECT COUNT(*) as cnt FROM kg_entities');
+    res.json({ success: true, entities: parseInt(stats.rows[0].cnt) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
 });
 
 app.get('/internal/signals/latest', requireInternalKey, async (req, res) => {
